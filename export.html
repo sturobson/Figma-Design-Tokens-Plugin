@@ -1,0 +1,383 @@
+<style>
+  :root {
+    --spacing: 0.8rem;
+    --spacing-sm: 0.5rem;
+    --spacing-xs: 0.3rem;
+    --font-size-normal: 11px;
+    --font-size-small: 10px;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    background-color: var(--figma-color-bg);
+    color: var(--figma-color-text);
+    margin: 0;
+    padding: var(--spacing);
+    font-size: var(--font-size-normal);
+  }
+
+  html,
+  body,
+  main {
+    height: 100%;
+  }
+
+  main {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing);
+  }
+
+  button {
+    appearance: none;
+    border-radius: 4px;
+    padding: var(--spacing-sm) var(--spacing);
+    font-size: var(--font-size-normal);
+    cursor: pointer;
+    background-color: var(--figma-color-bg-brand);
+    border: none;
+    color: var(--figma-color-text-onbrand);
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+      Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue",
+      sans-serif;
+    font-weight: bold;
+    display: block;
+    width: 100%;
+  }
+
+  label {
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+      Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue",
+      sans-serif;
+    fzont-size: var(--font-size-normal);
+  }
+
+  button#export {
+    background-color: var(--figma-color-bg-component);
+  }
+
+  button#github {
+    background-color: #24292e;
+  }
+
+  textarea {
+    background-color: var(--figma-color-bg-secondary);
+    border: 2px solid var(--figma-color-border);
+    color: var(--figma-color-text-secondary);
+    flex: 1;
+    font-family: Andale Mono, monospace;
+    font-size: 0.9rem;
+    overflow: auto;
+    padding: var(--spacing);
+    white-space: pre;
+    display: block;
+    width: 100%;
+  }
+
+  textarea:focus {
+    border-color: var(--figma-color-border-selected);
+    outline: none;
+  }
+
+  .selection-section {
+    background-color: var(--figma-color-bg-secondary);
+    border: 1px solid var(--figma-color-border);
+    border-radius: 4px;
+    padding: var(--spacing-sm);
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+  }
+
+  .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--spacing-sm);
+    padding-bottom: var(--spacing-xs);
+    border-bottom: 1px solid var(--figma-color-border);
+  }
+
+  .section-title {
+    font-weight: 600;
+    font-size: var(--font-size-normal);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--figma-color-text-secondary);
+  }
+
+  .select-all {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-xs);
+    font-size: var(--font-size-small);
+  }
+
+  .collection-item {
+    padding: var(--spacing-xs) 0;
+  }
+
+  .collection-item:last-child {
+    margin-bottom: 0;
+  }
+
+  .collection-header {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    font-weight: 500;
+    font-size: var(--font-size-normal);
+  }
+
+  .modes {
+    margin-left: 1.2rem;
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-xs);
+    padding: var(--spacing-xs) 0;
+  }
+
+  .mode-item {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    font-size: var(--font-size-small);
+  }
+
+  label {
+    cursor: pointer;
+    user-select: none;
+    line-height: 1.3;
+  }
+
+  input[type="checkbox"] {
+    cursor: pointer;
+    margin: 0;
+    flex-shrink: 0;
+  }
+
+  #selection-container {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing);
+    height: 100%;
+  }
+
+  #result-container {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing);
+    height: 100%;
+  }
+
+  .button-group {
+    display: flex;
+    gap: var(--spacing-sm);
+  }
+
+  .button-group button {
+    flex: 1;
+  }
+
+  .hidden {
+    display: none;
+  }
+</style>
+<main>
+  <div id="selection-container">
+    <div class="selection-section" id="collections-list">
+      <p>Loading collections...</p>
+    </div>
+    <button id="export" type="button">Export Selected</button>
+  </div>
+  <div id="result-container" class="hidden">
+    <textarea placeholder="Exported variables will render here..." readonly></textarea>
+    <div class="button-group">
+      <button id="copy" type="button">Copy to Clipboard</button>
+      <button id="github" type="button">Open in GitHub</button>
+    </div>
+    <button id="back" type="button">Back to Selection</button>
+  </div>
+</main>
+<script>
+  let collectionsData = [];
+
+  // Request collections list on load
+  console.log("UI loaded, requesting collections...");
+  parent.postMessage({ pluginMessage: { type: "GET_COLLECTIONS" } }, "*");
+
+  window.onmessage = (event) => {
+    console.log("UI received message:", event.data);
+    const pluginMessage = event.data.pluginMessage;
+    if (!pluginMessage) return;
+
+    if (pluginMessage.type === "COLLECTIONS_LIST") {
+      console.log("Received collections:", pluginMessage.collections);
+      collectionsData = pluginMessage.collections;
+      renderCollectionsList(pluginMessage.collections);
+    } else if (pluginMessage.type === "EXPORT_RESULT") {
+      // Display all files as separate JSON objects without comments
+      const output = pluginMessage.files.map(({ fileName, body }) => {
+        return JSON.stringify(body, null, 2);
+      }).join('\n\n');
+      document.querySelector("textarea").innerHTML = output;
+
+      // Show result container, hide selection
+      document.getElementById("selection-container").classList.add("hidden");
+      document.getElementById("result-container").classList.remove("hidden");
+    }
+  };
+
+  function renderCollectionsList(collections) {
+    const container = document.getElementById("collections-list");
+    if (collections.length === 0) {
+      container.innerHTML = '<p>No collections found in this file.</p>';
+      return;
+    }
+
+    let html = '';
+
+    // Header with Select All
+    html += `<div class="section-header">`;
+    html += `<span class="section-title">Collections</span>`;
+    html += `<div class="select-all">`;
+    html += `<input type="checkbox" id="select-all" class="select-all-checkbox">`;
+    html += `<label for="select-all">Select All</label>`;
+    html += `</div>`;
+    html += `</div>`;
+
+    collections.forEach(collection => {
+      html += `<div class="collection-item">`;
+      html += `<div class="collection-header">`;
+      html += `<input type="checkbox" id="col-${collection.id}" data-collection-id="${collection.id}" class="collection-checkbox">`;
+      html += `<label for="col-${collection.id}">${collection.name}</label>`;
+      html += `</div>`;
+
+      if (collection.modes.length > 1) {
+        html += `<div class="modes">`;
+        html += `<span class="section-title" style="font-size: 9px; margin-bottom: 4px;">Modes</span>`;
+        collection.modes.forEach(mode => {
+          html += `<div class="mode-item">`;
+          html += `<input type="checkbox" id="mode-${collection.id}-${mode.modeId}" data-collection-id="${collection.id}" data-mode-id="${mode.modeId}" class="mode-checkbox" disabled>`;
+          html += `<label for="mode-${collection.id}-${mode.modeId}">${mode.name}</label>`;
+          html += `</div>`;
+        });
+        html += `</div>`;
+      }
+      html += `</div>`;
+    });
+
+    container.innerHTML = html;
+
+    // Add event listeners
+    document.querySelectorAll('.collection-checkbox').forEach(cb => {
+      cb.addEventListener('change', handleCollectionChange);
+    });
+
+    // Select All listener
+    document.getElementById('select-all').addEventListener('change', (e) => {
+      const isChecked = e.target.checked;
+      document.querySelectorAll('.collection-checkbox').forEach(cb => {
+        cb.checked = isChecked;
+        cb.dispatchEvent(new Event('change'));
+      });
+    });
+  }
+
+  function handleCollectionChange(e) {
+    const collectionId = e.target.dataset.collectionId;
+    const isChecked = e.target.checked;
+    const modeCheckboxes = document.querySelectorAll(`input.mode-checkbox[data-collection-id="${collectionId}"]`);
+
+    modeCheckboxes.forEach(cb => {
+      cb.disabled = !isChecked;
+      if (isChecked) {
+        cb.checked = true;
+      } else {
+        cb.checked = false;
+      }
+    });
+  }
+
+  document.getElementById("export").addEventListener("click", () => {
+    const selectedCollections = [];
+
+    document.querySelectorAll('.collection-checkbox:checked').forEach(cb => {
+      const collectionId = cb.dataset.collectionId;
+      const modeCheckboxes = document.querySelectorAll(`input.mode-checkbox[data-collection-id="${collectionId}"]:checked`);
+
+      const modeIds = Array.from(modeCheckboxes).map(mcb => mcb.dataset.modeId);
+
+      // If no modes selected (single mode collection) or all modes selected, export all
+      const collection = collectionsData.find(c => c.id === collectionId);
+
+      selectedCollections.push({
+        id: collectionId,
+        modeIds: modeIds.length > 0 ? modeIds : collection.modes.map(m => m.modeId)
+      });
+    });
+
+    if (selectedCollections.length === 0) {
+      alert('Please select at least one collection to export.');
+      return;
+    }
+
+    parent.postMessage({
+      pluginMessage: {
+        type: "EXPORT",
+        selections: selectedCollections
+      }
+    }, "*");
+  });
+  document.getElementById("copy").addEventListener("click", async () => {
+    const textarea = document.querySelector("textarea");
+    if (textarea.value) {
+      try {
+        // Try modern clipboard API first
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(textarea.value);
+        } else {
+          // Fallback for older browsers or iframe contexts
+          const textArea = document.createElement("textarea");
+          textArea.value = textarea.value;
+          document.body.appendChild(textArea);
+          textArea.select();
+          document.execCommand("copy");
+          document.body.removeChild(textArea);
+        }
+
+        const button = document.getElementById("copy");
+        const originalText = button.textContent;
+        button.textContent = "Copied!";
+        setTimeout(() => {
+          button.textContent = originalText;
+        }, 2000);
+      } catch (err) {
+        console.error("Failed to copy:", err);
+        alert("Failed to copy to clipboard");
+      }
+    }
+  });
+
+  document.getElementById("back").addEventListener("click", () => {
+    document.getElementById("result-container").classList.add("hidden");
+    document.getElementById("selection-container").classList.remove("hidden");
+  });
+
+  document.getElementById("github").addEventListener("click", () => {
+    // GitHub configuration - edit these values for your repo
+    const github = {
+      owner: "sturobson",
+      repo: "sprott-design-tokens",
+      branch: "main",
+      tokensPath: "src"
+    };
+
+    // Open GitHub repo tokens path
+    const url = `https://github.com/${github.owner}/${github.repo}/tree/${github.branch}/${github.tokensPath}`;
+    window.open(url, '_blank');
+  });
+</script>

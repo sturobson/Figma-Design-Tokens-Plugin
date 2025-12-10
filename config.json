@@ -1,0 +1,8 @@
+{
+  "github": {
+    "owner": "sturobson",
+    "repo": "sprott-design-tokens",
+    "branch": "main",
+    "tokensPath": "src"
+  }
+}
