@@ -1,6 +1,7 @@
 <style>
   :root {
     --spacing: 0.8rem;
+    --spacing-sm: 0.5rem;
   }
 
   * {
@@ -12,6 +13,7 @@
     color: var(--figma-color-text);
     margin: 0;
     padding: var(--spacing);
+    font-size: 11px;
   }
 
   html,
@@ -48,8 +50,24 @@
     padding: 0;
   }
 
+  textarea {
+    background-color: var(--figma-color-bg);
+    border: 2px solid var(--figma-color-border);
+    color: var(--figma-color-text);
+    padding: var(--spacing);
+    font-family: monospace;
+    font-size: 10px;
+    resize: vertical;
+  }
+
+  textarea:focus {
+    border-color: var(--figma-color-border-selected);
+    outline: none;
+  }
+
   button,
-  input {
+  input,
+  textarea {
     display: block;
     width: 100%;
   }
@@ -63,17 +81,202 @@
       sans-serif;
     font-weight: bold;
   }
+
+  .divider {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    color: var(--figma-color-text-secondary);
+  }
+
+  .divider::before,
+  .divider::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background-color: var(--figma-color-border);
+  }
+
+  #status {
+    color: var(--figma-color-text-secondary);
+    text-align: center;
+  }
+
+  #status.error {
+    color: var(--figma-color-text-danger);
+  }
+
+  #status.success {
+    color: var(--figma-color-text-success);
+  }
 </style>
 <main>
   <input type="file" id="fileInput" accept="application/json" multiple style="display: none" />
-  <button type="button" id="selectFiles">Select JSON Files</button>
+  <button type="button" id="selectFiles">Select Local Files</button>
+  <div class="divider">or</div>
+  <textarea id="pasteArea" placeholder="Paste tokens.json content here..." rows="10"></textarea>
+  <button type="button" id="importPaste">Import Pasted Content</button>
+  <p id="status"></p>
 </main>
 <script>
   const fileInput = document.getElementById("fileInput");
   const selectButton = document.getElementById("selectFiles");
+  const pasteArea = document.getElementById("pasteArea");
+  const importPasteButton = document.getElementById("importPaste");
+  const status = document.getElementById("status");
 
   selectButton.addEventListener("click", () => {
     fileInput.click();
+  });
+
+  importPasteButton.addEventListener("click", async () => {
+    const text = pasteArea.value;
+    if (!text.trim()) {
+      status.textContent = "Please paste some content first.";
+      status.className = "error";
+      return;
+    }
+
+    status.textContent = "Processing pasted content...";
+    status.className = "";
+
+    console.log("=== Paste Import Started ===");
+    console.log("Pasted content length:", text.length);
+
+    // The pasted content may contain multiple JSON objects separated by whitespace
+    // Split and parse each one
+    const jsonObjects = splitJsonObjects(text);
+    console.log("Found", jsonObjects.length, "JSON object(s) in pasted content");
+
+    // Process imports sequentially to avoid Figma API race conditions
+    const imports = [];
+    jsonObjects.forEach((jsonStr, index) => {
+      // We avoid JSON.parse in the UI because token files sometimes contain
+      // comments or JS-style keys and will throw. Send the raw JSON string
+      // to the plugin; it will sanitize and parse safely there. Attempt a
+      // simple regex extraction for the collection name for display purposes.
+      const collectionMatch = jsonStr.match(/\"collection\"\s*:\s*\"([^\"]+)\"/);
+      const collectionName = (collectionMatch && collectionMatch[1]) || `object-${index + 1}`;
+      console.log(`JSON Object ${index + 1} (${collectionName}): attempting import`);
+      // Generate a small hash and length for debugging comparison with plugin
+      function smallHash(s) {
+        let h = 0;
+        for (let i = 0; i < s.length; i++) { h = (h << 5) - h + s.charCodeAt(i); h |= 0; }
+        return (h >>> 0).toString(16);
+      }
+      const cleanedPreview = removeTrailingCommas(stripComments(jsonStr));
+      console.log(`JSON Object ${index + 1} sanitized length:`, cleanedPreview.length, 'hash:', smallHash(cleanedPreview));
+      console.log('Sanitized snippet start:', cleanedPreview.substring(0, 200));
+      console.log('Sanitized snippet end:', cleanedPreview.substring(Math.max(0, cleanedPreview.length - 200)));
+      // Try to JSON.parse the cleaned preview in the UI (safer than relying
+      // on the plugin's parser). If parse succeeds, send the structured
+      // object to the plugin, which avoids a plugin-side JSON.parse that
+      // can fail due to environment differences or subtle encodings.
+      let parsedBody = null;
+      try {
+        parsedBody = JSON.parse(cleanedPreview);
+      } catch (e) {
+        // Keep as raw string; plugin will sanitize/parse as fallback.
+        parsedBody = null;
+      }
+
+      let sendBody = null;
+      let sendBase64 = false;
+      if (parsedBody) {
+        sendBody = parsedBody;
+        sendBase64 = false;
+      } else if (typeof btoa === 'function') {
+        sendBody = btoa(cleanedPreview);
+        sendBase64 = true;
+      } else {
+        sendBody = cleanedPreview;
+        sendBase64 = false;
+      }
+      imports.push({
+        fileName: `${collectionName}.tokens.json`,
+        body: sendBody,
+        collectionName,
+        sanitizedLength: cleanedPreview.length,
+        sanitizedHash: smallHash(cleanedPreview),
+        parsedInUI: !!parsedBody,
+        base64Encoded: sendBase64,
+      });
+      console.log(`Added import ${collectionName}.tokens.json parsedInUI=${!!parsedBody} base64Encoded=${!parsedBody}`);
+    });
+
+    // Send imports one at a time with delay to prevent race conditions
+    console.log(`Sending ${imports.length} imports sequentially...`);
+    for (let i = 0; i < imports.length; i++) {
+      const { fileName: objFileName, body: jsonStr, collectionName } = imports[i];
+      status.textContent = `Importing ${i + 1}/${imports.length}: ${collectionName}...`;
+      console.log(`[${i + 1}/${imports.length}] Sending IMPORT for: ${objFileName}`);
+
+      parent.postMessage(
+        { pluginMessage: { type: "IMPORT", fileName: objFileName, body: imports[i].body, parsedInUI: imports[i].parsedInUI, base64Encoded: imports[i].base64Encoded } },
+        "*"
+      );
+      // Wait for plugin to acknowledge the import is complete
+      if (i < imports.length - 1) {
+        const waitForPlugin = () => new Promise((resolve) => {
+          const listener = (ev) => {
+            try {
+              const msg = ev.data?.pluginMessage;
+              if (msg && (msg.type === 'IMPORT_DONE' || msg.type === 'IMPORT_FAILED')) {
+                window.removeEventListener('message', listener);
+                resolve(msg);
+              }
+            } catch (err) {
+              // ignore
+            }
+          };
+          window.addEventListener('message', listener);
+        });
+
+        console.log(`Waiting for plugin import acknowledgement...`);
+        const reply = await Promise.race([waitForPlugin(), new Promise(resolve => setTimeout(() => resolve({ timeout: true }), 12000))]);
+        console.log('Plugin reply for import:', reply);
+        // short extra buffer to avoid tight loops
+        await new Promise(resolve => setTimeout(resolve, 300));
+        if (!reply || reply.timeout || reply.type === 'IMPORT_FAILED') {
+          status.textContent = `Import ${i + 1}/${imports.length} failed or timed out. Aborting further imports.`;
+          status.className = 'error';
+          console.error('Aborting further imports due to plugin failure or timeout', reply);
+          break;
+        }
+      }
+    }
+
+    status.textContent = `Imported ${imports.length} collection(s) from pasted content`;
+    status.className = "success";
+    console.log("=== Paste Import Complete ===");
+  });
+
+  // Listen for plugin messages to update status UI
+  window.addEventListener('message', (ev) => {
+    try {
+      const msg = ev.data?.pluginMessage;
+      if (!msg) return;
+
+      if (msg.type === 'IMPORT_DONE') {
+        console.log('IMPORT_DONE parsedInUI:', msg.parsedInUI, 'base64Encoded:', msg.base64Encoded);
+        status.textContent = `Imported: ${msg.fileName} (${msg.operationCount} ops)`;
+        status.className = 'success';
+      } else if (msg.type === 'IMPORT_FAILED') {
+        console.log('IMPORT_FAILED parsedInUI:', msg.parsedInUI, 'base64Encoded:', msg.base64Encoded);
+        status.textContent = `Import failed: ${msg.fileName} - ${msg.message || ''}`;
+        status.className = 'error';
+        console.error('IMPORT_FAILED details:', msg.sanitizedPreview);
+        if (msg.previewLines) {
+          console.error('Sanitized preview lines:\n', msg.previewLines);
+        }
+        if (msg.errorContext) {
+          console.error('Error context (around parse line', msg.errorLine + '):\n', msg.errorContext);
+          if (msg.errorLineCodes) console.error('Char codes for problem line:', msg.errorLineCodes);
+        }
+      }
+    } catch (err) {
+      // ignore malformed messages
+    }
   });
 
   fileInput.addEventListener("change", (e) => {
@@ -82,14 +285,164 @@
     files.forEach((file) => {
       const reader = new FileReader();
       reader.onload = (e) => {
-        const body = e.target.result;
+        const text = e.target.result;
         const fileName = file.name;
-        parent.postMessage(
-          { pluginMessage: { type: "IMPORT", fileName, body } },
-          "*"
-        );
+        const cleanedPreview = removeTrailingCommas(stripComments(text));
+        let parsedBody = null;
+        try {
+          parsedBody = JSON.parse(cleanedPreview);
+        } catch (err) {
+          parsedBody = null;
+        }
+        let body;
+        let base64Encoded = false;
+        if (parsedBody) {
+          body = parsedBody;
+          base64Encoded = false;
+        } else if (typeof btoa === 'function') {
+          body = btoa(cleanedPreview);
+          base64Encoded = true;
+        } else {
+          // No btoa available - send raw cleaned preview and mark as not base64
+          body = cleanedPreview;
+          base64Encoded = false;
+        }
+        parent.postMessage({ pluginMessage: { type: "IMPORT", fileName, body, parsedInUI: !!parsedBody, base64Encoded } }, "*");
       };
       reader.readAsText(file);
     });
   });
+
+  // Helper function to strip comments outside strings
+  function stripComments(str) {
+    let out = '';
+    let i = 0;
+    let inString = false;
+    let stringChar = null;
+    let escaped = false;
+    while (i < str.length) {
+      const ch = str[i];
+      const next = str[i + 1];
+      if (inString) {
+        out += ch;
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === stringChar) {
+          inString = false;
+          stringChar = null;
+        }
+        i++;
+        continue;
+      }
+      if ((ch === '"' || ch === "'")) {
+        inString = true;
+        stringChar = ch;
+        out += ch;
+        i++;
+        continue;
+      }
+      if (ch === '/' && next === '/') {
+        i += 2;
+        while (i < str.length && str[i] !== '\n') i++;
+        continue;
+      }
+      if (ch === '/' && next === '*') {
+        i += 2;
+        while (i < str.length && !(str[i] === '*' && str[i + 1] === '/')) i++;
+        i += 2; // skip */
+        continue;
+      }
+      out += ch;
+      i++;
+    }
+    return out;
+  }
+
+  // Remove trailing commas before closing braces/brackets outside strings
+  function removeTrailingCommas(str) {
+    let res = '';
+    let inString = false;
+    let stringChar = null;
+    let escaped = false;
+    for (let i = 0; i < str.length; i++) {
+      const ch = str[i];
+      if (inString) {
+        res += ch;
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === stringChar) {
+          inString = false;
+          stringChar = null;
+        }
+        continue;
+      }
+      if ((ch === '"' || ch === "'")) {
+        inString = true;
+        stringChar = ch;
+        res += ch;
+        continue;
+      }
+      if (ch === ',') {
+        // look ahead for next non-whitespace
+        let j = i + 1;
+        while (j < str.length && /\s/.test(str[j])) j++;
+        if (str[j] === '}' || str[j] === ']') {
+          continue;
+        }
+      }
+      res += ch;
+    }
+    const cleaned2 = res.replace(/\uFEFF|\u200B|\u200C|\u200D|\u2060/g, '');
+    return cleaned2;
+  }
+
+  // Helper function to split multiple JSON objects from a single string
+  function splitJsonObjects(str) {
+    const cleaned = removeTrailingCommas(stripComments(str));
+    const objects = [];
+    let depth = 0;
+    let start = -1;
+    let inString = false;
+    let stringChar = null;
+    let escaped = false;
+
+    for (let i = 0; i < cleaned.length; i++) {
+      const char = cleaned[i];
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (char === '\\') {
+          escaped = true;
+        } else if (char === stringChar) {
+          inString = false;
+          stringChar = null;
+        }
+        continue; // skip counting braces inside strings
+      } else {
+        if (char === '"' || char === "'") {
+          inString = true;
+          stringChar = char;
+          continue;
+        }
+        if (char === '{') {
+          if (depth === 0) start = i;
+          depth++;
+        } else if (char === '}') {
+          depth--;
+          if (depth === 0 && start !== -1) {
+            objects.push(str.substring(start, i + 1));
+            start = -1;
+          }
+        }
+      }
+    }
+
+    console.log('splitJsonObjects: found', objects.length, 'objects');
+    return objects;
+  }
 </script>

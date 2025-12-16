@@ -59,10 +59,6 @@
     background-color: var(--figma-color-bg-component);
   }
 
-  button#github {
-    background-color: #24292e;
-  }
-
   textarea {
     background-color: var(--figma-color-bg-secondary);
     border: 2px solid var(--figma-color-border);
@@ -107,6 +103,13 @@
     text-transform: uppercase;
     letter-spacing: 0.5px;
     color: var(--figma-color-text-secondary);
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+      Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue",
+      sans-serif;
+  }
+
+  .modes .section-title {
+    margin-top: var(--spacing-xs);
   }
 
   .select-all {
@@ -130,6 +133,9 @@
     gap: var(--spacing-sm);
     font-weight: 500;
     font-size: var(--font-size-normal);
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+      Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue",
+      sans-serif;
   }
 
   .modes {
@@ -195,15 +201,41 @@
   </div>
   <div id="result-container" class="hidden">
     <textarea placeholder="Exported variables will render here..." readonly></textarea>
+    <!-- Combined output is always a merged object for style-dictionary compatibility -->
     <div class="button-group">
       <button id="copy" type="button">Copy to Clipboard</button>
-      <button id="github" type="button">Open in GitHub</button>
     </div>
-    <button id="back" type="button">Back to Selection</button>
+    <div class="button-group">
+      <button id="download-combined" type="button">Download Combined</button>
+      <button id="download-separate" type="button">Download Separate</button>
+    </div>
   </div>
 </main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script>
   let collectionsData = [];
+  let exportedFiles = []; // Store exported files for zip download
+
+  // Deep merge utility for combining token files
+  function deepMerge(target, source) {
+    if (!source) return target;
+    if (!target) return source;
+
+    const result = { ...target };
+    for (const key of Object.keys(source)) {
+      if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
+        // If it's a token (has $value), don't merge deeper - replace it
+        if (source[key].$value !== undefined) {
+          result[key] = source[key];
+        } else {
+          result[key] = deepMerge(result[key] || {}, source[key]);
+        }
+      } else {
+        result[key] = source[key];
+      }
+    }
+    return result;
+  }
 
   // Request collections list on load
   console.log("UI loaded, requesting collections...");
@@ -219,10 +251,46 @@
       collectionsData = pluginMessage.collections;
       renderCollectionsList(pluginMessage.collections);
     } else if (pluginMessage.type === "EXPORT_RESULT") {
-      // Display all files as separate JSON objects without comments
-      const output = pluginMessage.files.map(({ fileName, body }) => {
-        return JSON.stringify(body, null, 2);
-      }).join('\n\n');
+      // Store files for zip download
+      exportedFiles = pluginMessage.files;
+
+      // Build combined object; collect the first root $extensions and attach at the end
+      const combinedObj = {};
+      let firstExtensions = null;
+      // Combined array removed; merged object is used by default
+      pluginMessage.files.forEach(({ fileName, body }) => {
+        // Collect the first available $extensions without setting it on combinedObj yet
+        if (!firstExtensions && body && body.$extensions) {
+          firstExtensions = body.$extensions;
+        }
+
+        // Deep merge each file's tokens into combined object (skip $extensions)
+        for (const [key, value] of Object.entries(body)) {
+          if (key === '$extensions') continue;
+          combinedObj[key] = deepMerge(combinedObj[key] || {}, value);
+        }
+      });
+      // Attach the $extensions at the end so it serializes last
+      let extensions = {};
+      if (firstExtensions) {
+        extensions = { ...firstExtensions };
+        if (extensions.dateCreated) {
+          extensions.lastModified = new Date().toISOString();
+        } else if (extensions.date) {
+          extensions.dateCreated = extensions.date;
+          delete extensions.date;
+          extensions.lastModified = new Date().toISOString();
+        } else {
+          extensions.dateCreated = new Date().toISOString();
+        }
+      } else {
+        extensions.dateCreated = new Date().toISOString();
+      }
+      combinedObj.$extensions = extensions;
+
+
+      // Output merged object (style-dictionary compatible)
+      const output = JSON.stringify(combinedObj, null, 2);
       document.querySelector("textarea").innerHTML = output;
 
       // Show result container, hide selection
@@ -362,22 +430,120 @@
     }
   });
 
-  document.getElementById("back").addEventListener("click", () => {
-    document.getElementById("result-container").classList.add("hidden");
-    document.getElementById("selection-container").classList.remove("hidden");
+  // Download Combined - single tokens.json file (for Penpot compatibility)
+  document.getElementById("download-combined").addEventListener("click", async () => {
+    if (exportedFiles.length === 0) {
+      alert("No files to download");
+      return;
+    }
+
+    const button = document.getElementById("download-combined");
+    const originalText = button.textContent;
+    button.textContent = "Creating...";
+
+    try {
+      const zip = new JSZip();
+
+      // Combine tokens into a single file, while preserving the first $extensions found and attach it at the end
+      const combinedObj = {};
+      let firstExtensions = null;
+      exportedFiles.forEach(({ fileName, body }) => {
+        // Collect the first $extensions we encounter (but don't set it on the combined object yet)
+        if (!firstExtensions && body && body.$extensions) {
+          firstExtensions = body.$extensions;
+        }
+
+        for (const [key, value] of Object.entries(body)) {
+          if (key === '$extensions') continue;
+          combinedObj[key] = deepMerge(combinedObj[key] || {}, value);
+        }
+        // Skip array building; we export single merged object only
+      });
+      let extensions = {};
+      if (firstExtensions) {
+        extensions = { ...firstExtensions };
+        if (extensions.dateCreated) {
+          extensions.lastModified = new Date().toISOString();
+        } else if (extensions.date) {
+          extensions.dateCreated = extensions.date;
+          delete extensions.date;
+          extensions.lastModified = new Date().toISOString();
+        } else {
+          extensions.dateCreated = new Date().toISOString();
+        }
+      } else {
+        extensions.dateCreated = new Date().toISOString();
+      }
+      combinedObj.$extensions = extensions;
+      const content = JSON.stringify(combinedObj, null, 2);
+      zip.file("tokens.json", content);
+
+      // Generate the zip file
+      const blob = await zip.generateAsync({ type: "blob" });
+
+      // Create download link
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "design-tokens-combined.zip";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      button.textContent = "Downloaded!";
+      setTimeout(() => {
+        button.textContent = originalText;
+      }, 2000);
+    } catch (err) {
+      console.error("Failed to create zip:", err);
+      alert("Failed to create zip file");
+      button.textContent = originalText;
+    }
   });
 
-  document.getElementById("github").addEventListener("click", () => {
-    // GitHub configuration - edit these values for your repo
-    const github = {
-      owner: "sturobson",
-      repo: "sprott-design-tokens",
-      branch: "main",
-      tokensPath: "src"
-    };
+  // Download Separate - individual file per collection/mode
+  document.getElementById("download-separate").addEventListener("click", async () => {
+    if (exportedFiles.length === 0) {
+      alert("No files to download");
+      return;
+    }
 
-    // Open GitHub repo tokens path
-    const url = `https://github.com/${github.owner}/${github.repo}/tree/${github.branch}/${github.tokensPath}`;
-    window.open(url, '_blank');
+    const button = document.getElementById("download-separate");
+    const originalText = button.textContent;
+    button.textContent = "Creating...";
+
+    try {
+      const zip = new JSZip();
+
+      // Add each exported file separately
+      exportedFiles.forEach(({ fileName, body }) => {
+        const jsonContent = JSON.stringify(body, null, 2);
+        zip.file(fileName, jsonContent);
+      });
+
+      // Generate the zip file
+      const blob = await zip.generateAsync({ type: "blob" });
+
+      // Create download link
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "design-tokens-separate.zip";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      button.textContent = "Downloaded!";
+      setTimeout(() => {
+        button.textContent = originalText;
+      }, 2000);
+    } catch (err) {
+      console.error("Failed to create zip:", err);
+      alert("Failed to create zip file");
+      button.textContent = originalText;
+    }
   });
+
 </script>
